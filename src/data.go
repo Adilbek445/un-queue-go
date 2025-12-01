@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -39,6 +38,11 @@ type Tailer struct {
 	LastReadTime int64
 }
 
+type DataInfo struct {
+	Size int32
+	Time int64
+}
+
 // func main() {
 // 	currentDirectory = getCurrentDirectory()
 // }
@@ -50,20 +54,20 @@ func writeIndexFile(file *os.File, index IndexData) {
 	}
 }
 
-func writeDataFile(file *os.File, size int32, time int64) {
+func writeDataFile(file *os.File, data DataInfo, reader *bufio.Reader) {
+	binary.Write(file, binary.LittleEndian, data.Size)
+	binary.Write(file, binary.LittleEndian, data.Time)
+	tee := io.TeeReader(reader, os.Stdout)
+	_, err := io.Copy(file, tee)
 
-	buf := new(bytes.Buffer)
-
-	binary.Write(buf, binary.LittleEndian, size)
-	binary.Write(buf, binary.LittleEndian, time)
-
-	err := binary.Write(file, binary.LittleEndian, buf)
 	if err != nil {
 		panic(err)
 	}
+
 }
 
-func readIndexFile(file *os.File, index IndexData) {
+func readIndexFile(file *os.File, index *IndexData, offset int64) {
+	file.Seek(offset, 0)
 	err := binary.Read(file, binary.LittleEndian, index)
 	if err != nil {
 		panic(err)
@@ -77,7 +81,7 @@ func writeTailerFile(file *os.File, tailer Tailer) {
 	}
 }
 
-func readTailerFile(file *os.File, tailer Tailer) {
+func readTailerFile(file *os.File, tailer *Tailer) {
 	err := binary.Read(file, binary.LittleEndian, tailer)
 	if err != nil {
 		panic(err)
@@ -93,7 +97,8 @@ func writeMetadataFile(file *os.File, metadata Metadata) {
 	}
 }
 
-func readMetadataFile(file *os.File, metadata Metadata) {
+func readMetadataFile(file *os.File, metadata *Metadata) {
+	file.Seek(0, io.SeekStart)
 	err := binary.Read(file, binary.LittleEndian, metadata)
 	if err != nil {
 		panic(err)
@@ -102,11 +107,14 @@ func readMetadataFile(file *os.File, metadata Metadata) {
 
 func writeMessage(header Header, reader *bufio.Reader) {
 
-	metadataPath := getMetadataPath(header.QueueName)
-	if fileExists(metadataPath) {
+	queuePath := getQueuePath(header.QueueName)
 
+	fmt.Println(queuePath)
+	if isDirExists(queuePath) {
+		writeExistQueue(header, reader)
 	} else {
-
+		os.MkdirAll(queuePath, 0777)
+		writeNewQueue(header, reader)
 	}
 }
 
@@ -115,12 +123,9 @@ func writeNewQueue(header Header, reader *bufio.Reader) {
 	metadata := Metadata{}
 	metadata = Metadata{1, 12 + int64(header.TailerOrPayloadSize), 1, 1}
 
-	metadataPath := filepath.FromSlash(getMetadataPath(header.QueueName))
+	timeNow := getTimeNow()
 
-	fmt.Println(currentDirectory)
-	fmt.Println(len(header.QueueName))
-	fmt.Println(metadataPath)
-
+	metadataPath := getMetadataPath(header.QueueName)
 	metadataFile, err := os.OpenFile(metadataPath, os.O_WRONLY|os.O_CREATE, 0666)
 	defer metadataFile.Close()
 	if err != nil {
@@ -129,21 +134,18 @@ func writeNewQueue(header Header, reader *bufio.Reader) {
 
 	writeMetadataFile(metadataFile, metadata)
 
-	indexFile, err := os.OpenFile(filepath.FromSlash(getIndexPath(header.QueueName)), os.O_WRONLY|os.O_CREATE, 0666)
-
-	if err != nil {
-		panic(err)
-	}
-
-	timeNow := getTimeNow()
+	indexFile, err := os.OpenFile(getIndexPath(header.QueueName), os.O_WRONLY|os.O_CREATE, 0666)
+	defer indexFile.Close()
 
 	index := IndexData{1, 1, header.TailerOrPayloadSize, 0, timeNow}
 	writeIndexFile(indexFile, index)
 
-	dataFile, err := os.OpenFile(filepath.FromSlash(getSegmentPath(header.QueueName, 1)), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
-	writeDataFile(dataFile, header.TailerOrPayloadSize, timeNow)
+	dataFile, err := os.OpenFile(getSegmentPath(header.QueueName, 1), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	defer dataFile.Close()
 
-	_, err = io.Copy(dataFile, reader)
+	dataInfo := DataInfo{header.TailerOrPayloadSize, timeNow}
+
+	writeDataFile(dataFile, dataInfo, reader)
 
 	if err != nil {
 		panic(err)
@@ -152,11 +154,15 @@ func writeNewQueue(header Header, reader *bufio.Reader) {
 
 func writeExistQueue(header Header, reader *bufio.Reader) {
 	metadata := Metadata{}
-	file, err := os.Open(getMetadataPath(header.QueueName))
+	metadataFile, err := os.Open(getMetadataPath(header.QueueName))
+	defer metadataFile.Close()
+
 	if err != nil {
 		panic(err)
 	}
-	err = binary.Read(file, binary.LittleEndian, &metadata)
+	timeNow := getTimeNow()
+
+	err = binary.Read(metadataFile, binary.LittleEndian, &metadata)
 	metadata.CurrentOffsetWrite = metadata.CurrentOffsetWrite + 12 + int64(header.TailerOrPayloadSize)
 	isNewSegment := MAX_SEGMENT_SIZE-(metadata.CurrentOffsetWrite+12) < int64(header.TailerOrPayloadSize)
 
@@ -165,14 +171,83 @@ func writeExistQueue(header Header, reader *bufio.Reader) {
 		metadata.CurrentSegment = metadata.CurrentSegment + 1
 	}
 	metadata.CountMessage = metadata.CountMessage + 1
+
+	indexFile, err := os.OpenFile(getIndexPath(header.QueueName), os.O_WRONLY|os.O_APPEND, 0666)
+	defer indexFile.Close()
+
+	index := IndexData{
+		metadata.CountMessage,
+		metadata.CurrentSegment,
+		header.TailerOrPayloadSize,
+		metadata.CurrentOffsetWrite,
+		timeNow}
+
+	writeIndexFile(indexFile, index)
+
+	dataFile, err := os.OpenFile(getSegmentPath(header.QueueName, metadata.CurrentSegment), os.O_WRONLY|os.O_APPEND, 0666)
+	defer dataFile.Close()
+
+	dataInfo := DataInfo{header.TailerOrPayloadSize, timeNow}
+
+	writeDataFile(dataFile, dataInfo, reader)
 }
 
-func getMessage() {
+func getMessage(header Header, writer *bufio.Writer) {
+
+	metadata := Metadata{}
+	metadataFile, err := os.Open(getMetadataPath(header.QueueName))
+	defer metadataFile.Close()
+
+	queuePath := getQueuePath(header.QueueName)
+	timeNow := getTimeNow()
+
+	if !isDirExists(queuePath) {
+		writer.Write([]byte("Queue not exist"))
+		return
+	}
+
+	tailerPath := getTailerPath(header.QueueName, header.TailerName)
+	os.MkdirAll(tailerPath, 0777)
+
+	tailer := Tailer{}
+
+	tailerFile, err := os.OpenFile(tailerPath, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0666)
+	defer tailerFile.Close()
+
+	if err != nil {
+		panic(err)
+	}
+
+	tailerFileInfo, errStat := os.Stat(tailerPath)
+
+	if errStat != nil {
+		panic(err)
+	}
+
+	if tailerFileInfo.Size() == 0 {
+		tailer.Messageid = 1
+		tailer.LastReadTime = timeNow
+	} else {
+		readTailerFile(tailerFile, &tailer)
+	}
+
+	if int64(metadata.CountMessage) == tailer.Messageid {
+		writer.Write(collectErrorBuf("New messages not exist"))
+		return
+	}
+
+	tailer.Messageid = tailer.Messageid + 1
+	tailer.LastReadTime = timeNow
+
+	index := IndexData{}
+
+	indexFile, err := os.OpenFile(getIndexPath(header.QueueName), os.O_RDWR, 0666)
+
+	readIndexFile(indexFile, &index, 28*tailer.Messageid)
 
 }
 
 func getCurrentDirectory() string {
-	//	return "C:\\temp"
 	return filepath.FromSlash("C:/dev/projects/my/Go-language/un-queue-go/resources")
 }
 
@@ -186,9 +261,17 @@ func getSegmentPath(queueName string, segmentId int32) string {
 }
 
 func getMetadataPath(queueName string) string {
-	return currentDirectory + "/" + queueName + "/" + METADATA_FILE
+	return filepath.FromSlash(filepath.Join(currentDirectory, queueName, METADATA_FILE))
 }
 
 func getIndexPath(queueName string) string {
-	return currentDirectory + "/" + queueName + "/" + INDEX_DATA_FILE
+	return filepath.Join(currentDirectory, queueName, INDEX_DATA_FILE)
+}
+
+func getQueuePath(queueName string) string {
+	return filepath.FromSlash(filepath.Join(currentDirectory, queueName))
+}
+
+func getTailerPath(queueName string, tailer string) string {
+	return filepath.Join(currentDirectory, queueName, "tailer", tailer, TAILER_EXTENSION)
 }
