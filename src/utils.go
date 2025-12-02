@@ -48,3 +48,17 @@ func collectErrorBuf(errorMessage string) []byte {
 	payload = append(payload, errorMessageByte...)
 	return payload
 }
+
+func IsAlphanumericASCII(s string) bool {
+	for _, r := range s {
+		isLetterOrDigit := (r >= '0' && r <= '9') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= 'a' && r <= 'z')
+
+		if !isLetterOrDigit {
+			return false
+		}
+	}
+
+	return len(s) > 0
+}
