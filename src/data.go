@@ -15,6 +15,8 @@ var DATA_FILE_EXTENSION string = ".dat"
 var TAILER_EXTENSION string = ".trl"
 var DATA_FILE_PREFIX string = "data-"
 var MAX_SEGMENT_SIZE int64 = 512 * 1024 * 1024
+var INDEX_RECORD_SIZE = 28
+var DATA_HEADER_SIZE = 12
 
 var currentDirectory string
 
@@ -43,10 +45,6 @@ type DataInfo struct {
 	Time int64
 }
 
-// func main() {
-// 	currentDirectory = getCurrentDirectory()
-// }
-
 func writeIndexFile(file *os.File, index IndexData) {
 	err := binary.Write(file, binary.LittleEndian, index)
 	if err != nil {
@@ -66,8 +64,22 @@ func writeDataFile(file *os.File, data DataInfo, reader *bufio.Reader) {
 
 }
 
+func readDataFile(file *os.File, offset int64, size int64, writer *bufio.Writer) {
+	offset = offset + int64(DATA_HEADER_SIZE)
+	_, err := file.Seek(offset, io.SeekStart)
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = io.CopyN(writer, file, size)
+	if err != nil && err != io.EOF {
+		panic(err)
+	}
+
+}
+
 func readIndexFile(file *os.File, index *IndexData, offset int64) {
-	file.Seek(offset, 0)
+	file.Seek(offset, io.SeekStart)
 	err := binary.Read(file, binary.LittleEndian, index)
 	if err != nil {
 		panic(err)
@@ -126,43 +138,54 @@ func writeNewQueue(header Header, reader *bufio.Reader) {
 	timeNow := getTimeNow()
 
 	metadataPath := getMetadataPath(header.QueueName)
-	metadataFile, err := os.OpenFile(metadataPath, os.O_WRONLY|os.O_CREATE, 0666)
-	defer metadataFile.Close()
-	if err != nil {
-		panic(err)
+	metadataFile, metaOpenErr := os.OpenFile(metadataPath, os.O_WRONLY|os.O_CREATE, 0666)
+
+	if metaOpenErr != nil {
+		panic(metaOpenErr)
 	}
+
+	defer metadataFile.Close()
 
 	writeMetadataFile(metadataFile, metadata)
 
-	indexFile, err := os.OpenFile(getIndexPath(header.QueueName), os.O_WRONLY|os.O_CREATE, 0666)
+	indexFile, indexOpenErr := os.OpenFile(getIndexPath(header.QueueName), os.O_WRONLY|os.O_CREATE, 0666)
+	if indexOpenErr != nil {
+		panic(indexOpenErr)
+	}
+
 	defer indexFile.Close()
 
 	index := IndexData{1, 1, header.TailerOrPayloadSize, 0, timeNow}
 	writeIndexFile(indexFile, index)
 
-	dataFile, err := os.OpenFile(getSegmentPath(header.QueueName, 1), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	dataFile, dataOpenErr := os.OpenFile(getSegmentPath(header.QueueName, 1), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+
+	if dataOpenErr != nil {
+		panic(dataOpenErr)
+	}
+
 	defer dataFile.Close()
 
 	dataInfo := DataInfo{header.TailerOrPayloadSize, timeNow}
 
 	writeDataFile(dataFile, dataInfo, reader)
 
-	if err != nil {
-		panic(err)
-	}
 }
 
 func writeExistQueue(header Header, reader *bufio.Reader) {
 	metadata := Metadata{}
-	metadataFile, err := os.Open(getMetadataPath(header.QueueName))
+	metadataFile, metaOpenErr := os.Open(getMetadataPath(header.QueueName))
+
+	if metaOpenErr != nil {
+		panic(metaOpenErr)
+	}
+
 	defer metadataFile.Close()
 
-	if err != nil {
-		panic(err)
-	}
 	timeNow := getTimeNow()
 
-	err = binary.Read(metadataFile, binary.LittleEndian, &metadata)
+	readMetadataFile(metadataFile, &metadata)
+
 	metadata.CurrentOffsetWrite = metadata.CurrentOffsetWrite + 12 + int64(header.TailerOrPayloadSize)
 	isNewSegment := MAX_SEGMENT_SIZE-(metadata.CurrentOffsetWrite+12) < int64(header.TailerOrPayloadSize)
 
@@ -172,7 +195,12 @@ func writeExistQueue(header Header, reader *bufio.Reader) {
 	}
 	metadata.CountMessage = metadata.CountMessage + 1
 
-	indexFile, err := os.OpenFile(getIndexPath(header.QueueName), os.O_WRONLY|os.O_APPEND, 0666)
+	indexFile, indexOpenErr := os.OpenFile(getIndexPath(header.QueueName), os.O_WRONLY|os.O_APPEND, 0666)
+
+	if indexOpenErr != nil {
+		panic(indexOpenErr)
+	}
+
 	defer indexFile.Close()
 
 	index := IndexData{
@@ -184,7 +212,12 @@ func writeExistQueue(header Header, reader *bufio.Reader) {
 
 	writeIndexFile(indexFile, index)
 
-	dataFile, err := os.OpenFile(getSegmentPath(header.QueueName, metadata.CurrentSegment), os.O_WRONLY|os.O_APPEND, 0666)
+	dataFile, dataOpenErr := os.OpenFile(getSegmentPath(header.QueueName, metadata.CurrentSegment), os.O_WRONLY|os.O_APPEND, 0666)
+
+	if dataOpenErr != nil {
+		panic(dataOpenErr)
+	}
+
 	defer dataFile.Close()
 
 	dataInfo := DataInfo{header.TailerOrPayloadSize, timeNow}
@@ -195,14 +228,18 @@ func writeExistQueue(header Header, reader *bufio.Reader) {
 func getMessage(header Header, writer *bufio.Writer) {
 
 	metadata := Metadata{}
-	metadataFile, err := os.Open(getMetadataPath(header.QueueName))
+	metadataFile, errMfile := os.Open(getMetadataPath(header.QueueName))
+
+	if errMfile != nil {
+		panic(errMfile)
+	}
 	defer metadataFile.Close()
 
 	queuePath := getQueuePath(header.QueueName)
 	timeNow := getTimeNow()
 
 	if !isDirExists(queuePath) {
-		writer.Write([]byte("Queue not exist"))
+		writer.Write(collectErrorBuf("Queue not exist"))
 		return
 	}
 
@@ -211,17 +248,17 @@ func getMessage(header Header, writer *bufio.Writer) {
 
 	tailer := Tailer{}
 
-	tailerFile, err := os.OpenFile(tailerPath, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0666)
-	defer tailerFile.Close()
-
-	if err != nil {
-		panic(err)
+	tailerFile, errTfile := os.OpenFile(tailerPath, os.O_RDWR|os.O_CREATE, 0666)
+	if errTfile != nil {
+		panic(errTfile)
 	}
+
+	defer tailerFile.Close()
 
 	tailerFileInfo, errStat := os.Stat(tailerPath)
 
 	if errStat != nil {
-		panic(err)
+		panic(errStat)
 	}
 
 	if tailerFileInfo.Size() == 0 {
@@ -241,9 +278,24 @@ func getMessage(header Header, writer *bufio.Writer) {
 
 	index := IndexData{}
 
-	indexFile, err := os.OpenFile(getIndexPath(header.QueueName), os.O_RDWR, 0666)
+	indexFile, errInfile := os.OpenFile(getIndexPath(header.QueueName), os.O_RDWR, 0666)
 
-	readIndexFile(indexFile, &index, 28*tailer.Messageid)
+	if errInfile != nil {
+		panic(errInfile)
+	}
+
+	defer indexFile.Close()
+	readIndexFile(indexFile, &index, int64(INDEX_RECORD_SIZE)*tailer.Messageid)
+
+	dataFile, errDfile := os.OpenFile(getSegmentPath(header.QueueName, metadata.CurrentSegment), os.O_RDONLY, 0666)
+
+	if errDfile != nil {
+		panic(errDfile)
+	}
+
+	defer dataFile.Close()
+
+	readDataFile(dataFile, index.OffsetInData+int64(DATA_HEADER_SIZE), int64(index.Size), writer)
 
 }
 
