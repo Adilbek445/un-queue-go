@@ -23,7 +23,7 @@ func TestWriteAndReadMetadata(t *testing.T) {
 
 	defer file.Close()
 
-	metadata := Metadata{1, 2, 3, 4}
+	metadata := Metadata{1, 2, 3, 4, 5}
 
 	writeMetadataFile(file, metadata)
 

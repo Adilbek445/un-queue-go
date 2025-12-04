@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"net"
 )
@@ -28,33 +29,36 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
-	for {
-		headerBytes := make([]byte, 7)
-		_, err := reader.Read(headerBytes)
-		header := serializeHeader([7]byte(headerBytes))
-		queueNameBytes := make([]byte, header.QueueNameSize)
-		reader.Read(queueNameBytes)
 
-		fmt.Println(header.QueueNameSize)
+	headerBytes := make([]byte, 7)
+	_, err := reader.Read(headerBytes)
+	header := serializeHeader([7]byte(headerBytes))
+	queueNameBytes := make([]byte, header.QueueNameSize)
+	reader.Read(queueNameBytes)
 
-		if header.HeaderFlag != int8(WRITE_MESSAGE) {
-			tailerNameBytes := make([]byte, header.TailerOrPayloadSize)
-			reader.Read(tailerNameBytes)
-			header.TailerName = string(tailerNameBytes)
-		}
+	fmt.Println(header.QueueNameSize)
 
-		queueName := string(queueNameBytes)
-		header.QueueName = queueName
-
-		fmt.Println("QueueName " + header.QueueName)
-		handleMessage(header, reader, writer)
-		if err != nil {
-			log.Println("Connection closed:", err)
+	if header.HeaderFlag != int8(WRITE_MESSAGE) {
+		tailerNameBytes := make([]byte, header.TailerOrPayloadSize)
+		if _, err := io.ReadFull(reader, tailerNameBytes); err != nil {
+			log.Println("Connection closed (tailer read):", err)
 			return
 		}
-		fmt.Printf("Received")
-
+		header.TailerName = string(tailerNameBytes)
 	}
+
+	queueName := string(queueNameBytes)
+	header.QueueName = queueName
+
+	fmt.Println("QueueName " + header.QueueName)
+	fmt.Println("tailer " + header.TailerName)
+	handleMessage(header, reader, writer)
+	if err != nil {
+		log.Println("Connection closed:", err)
+		return
+	}
+	fmt.Printf("Received")
+
 }
 
 func handleMessage(header Header, reader *bufio.Reader, writer *bufio.Writer) {
@@ -63,11 +67,12 @@ func handleMessage(header Header, reader *bufio.Reader, writer *bufio.Writer) {
 
 	switch flag {
 	case int8(GET_MESSAGE):
-		fmt.Println("Get message")
+		getMessage(header, writer)
+		writer.Flush()
 	case int8(WRITE_MESSAGE):
 		writeMessage(header, reader)
 	case int8(GET_STAT):
-		getMessage(header, writer)
+		getStat(header, writer)
 	case int8(CHECK_NEW_MESSAGE):
 		fmt.Println("Check new message")
 	default:
