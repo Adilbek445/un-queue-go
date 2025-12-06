@@ -6,9 +6,10 @@ import (
 )
 
 func main() {
-	listenPort := ":8070"
+	cfg, err := LoadConfig("config")
+	listenPort := cfg.Server.Port
 	currentDirectory = getCurrentDirectory()
-	listener, err := net.Listen("tcp", listenPort)
+	listener, err := net.Listen("tcp", ":"+listenPort)
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", listenPort, err)
 	}
@@ -22,6 +23,6 @@ func main() {
 			log.Println("Failed to accept connection:", err)
 			continue
 		}
-		go handleConnection(conn) // goroutine — аналог асинхронного ожидания epoll
+		go handleConnection(conn)
 	}
 }
