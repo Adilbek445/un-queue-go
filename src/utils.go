@@ -67,6 +67,13 @@ func queueStatToBuf(stat QueueStat) []byte {
 	return payload
 }
 
+func newMessageCheckBuf(newMessageExist byte) []byte {
+	header := byte(0x01)
+	payload := []byte{header}
+	payload = append(payload, newMessageExist)
+	return payload
+}
+
 func IsAlphanumericASCII(s string) bool {
 	for _, r := range s {
 		isLetterOrDigit := (r >= '0' && r <= '9') ||

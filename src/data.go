@@ -279,9 +279,21 @@ func getStat(header Header, writer *bufio.Writer) {
 	tailerDir := getTailerDirectory(header.QueueName)
 	os.MkdirAll(tailerDir, 0777)
 
-	tailer := Tailer{}
+	tailer := Tailer{0, 0}
 	tailerPath := getTailerPath(header.QueueName, header.TailerName)
 	tailerFile, errTfile := os.OpenFile(tailerPath, os.O_RDWR|os.O_CREATE, 0777)
+
+	tailerFileInfo, errStat := os.Stat(tailerPath)
+
+	if errStat != nil {
+		panic(errStat)
+	}
+
+	if tailerFileInfo.Size() == 0 {
+		fmt.Println("tailer пустой")
+	} else {
+		readTailerFile(tailerFile, &tailer)
+	}
 
 	if errTfile != nil {
 		panic(errTfile)
@@ -313,11 +325,53 @@ func getStat(header Header, writer *bufio.Writer) {
 	stat.LastWriteTime = indexLastMessage.Time
 	stat.TailerCountMessage = int32(tailer.Messageid)
 	stat.TailerLastTime = tailer.LastReadTime
+	stat.QueueDataSize = metadata.QueueDataSize
 
 	writer.Write(queueStatToBuf(stat))
 	writer.Flush()
 }
 
 func checkNewMessage(header Header, writer *bufio.Writer) {
+	metadata := Metadata{}
+	metadataFile, errMfile := os.Open(getMetadataPath(header.QueueName))
+	readMetadataFile(metadataFile, &metadata)
+	if errMfile != nil {
+		panic(errMfile)
+	}
+	defer metadataFile.Close()
+
+	queuePath := getQueuePath(header.QueueName)
+
+	if !isDirExists(queuePath) {
+		writer.Write(collectErrorBuf("Queue not exist"))
+		writer.Flush()
+		return
+	}
+
+	tailerPath := getTailerPath(header.QueueName, header.TailerName)
+	if !IsFileExists(tailerPath) {
+		writer.Write(collectErrorBuf("Tailer not exist"))
+		writer.Flush()
+		return
+	}
+
+	tailer := Tailer{0, 0}
+	tailerFile, errTfile := os.OpenFile(tailerPath, os.O_RDONLY, 0777)
+	if errTfile != nil {
+		panic(errTfile)
+	}
+	defer tailerFile.Close()
+
+	readTailerFile(tailerFile, &tailer)
+
+	resp := byte(0x01)
+
+	if int64(metadata.CountMessage) == tailer.Messageid {
+		fmt.Println("New messages not exist")
+		resp = byte(0x00)
+	}
+
+	writer.Write(newMessageCheckBuf(resp))
+	writer.Flush()
 
 }
